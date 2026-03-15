@@ -1316,7 +1316,7 @@ function abrirSubcarpetaCalidad(subId) {
   document.getElementById('calidadSubContent').innerHTML = html;
   // Add persistent click handler for infra cards
   var subContent = document.getElementById('calidadSubContent');
-  subContent.onclick = function(e) {
+  function handleSubContentClick(e) {
     // Handle infra cards (techumbres)
     var infraCard = e.target.closest('.infra-card');
     if (infraCard) {
@@ -1334,8 +1334,11 @@ function abrirSubcarpetaCalidad(subId) {
       var aidx = parseInt(activoCard.getAttribute('data-actividx'));
       var a = window._calidadActivos[aidx];
       if (a) abrirActivoCalidad(aidx);
+      return;
     }
-  };
+  }
+  subContent.onclick = handleSubContentClick;
+  subContent.ontouchend = function(e) { e.preventDefault(); handleSubContentClick(e); };
   cargarDocsCalidad(subId);
   openModal('calidadSubModal');
 }
