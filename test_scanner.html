@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Diagnóstico Scanner</title>
+<style>
+body { font-family: sans-serif; padding: 1rem; background: #111; color: #eee; }
+video { width: 100%; border-radius: 8px; display: block; background: #000; }
+#log { background: #1e1e1e; border-radius: 8px; padding: 1rem; margin-top: 1rem;
+       font-size: .75rem; font-family: monospace; height: 200px; overflow-y: auto;
+       white-space: pre-wrap; word-break: break-all; }
+button { padding: .8rem 1.2rem; border: none; border-radius: 8px; font-size: .95rem;
+         cursor: pointer; margin: .3rem 0; width: 100%; font-weight: 600; }
+.g { background: #27ae60; color: #fff; }
+.r { background: #e74c3c; color: #fff; }
+.b { background: #2980b9; color: #fff; }
+#result { font-size: 1.3rem; font-weight: bold; color: #2ecc71; text-align: center;
+          padding: 1rem; display: none; background: #1a3a1a; border-radius: 8px; margin-top:.5rem; }
+.ok { color: #2ecc71; } .err { color: #e74c3c; } .warn { color: #f39c12; }
+</style>
+</head>
+<body>
+<h2>🔬 Diagnóstico Scanner</h2>
+<video id="video" playsinline autoplay muted></video>
+<div id="result"></div>
+<button class="b" onclick="checkSupport()">1. Verificar soporte del navegador</button>
+<button class="g" onclick="iniciar()">2. Iniciar scanner</button>
+<button class="r" onclick="detener()">■ Detener</button>
+<div id="log">Presiona "Verificar soporte" primero...\n</div>
+
+<script>
+var stream = null;
+var timer = null;
+var detector = null;
+var frames = 0;
+var active = false;
+
+function log(msg, cls) {
+  var el = document.getElementById('log');
+  var line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = new Date().toLocaleTimeString('es-CL') + ' | ' + msg;
+  el.insertBefore(line, el.firstChild);
+}
+
+async function checkSupport() {
+  log('=== VERIFICANDO SOPORTE ===');
+
+  // 1. BarcodeDetector nativo
+  if ('BarcodeDetector' in window) {
+    log('✅ BarcodeDetector API: DISPONIBLE', 'ok');
+    try {
+      var formats = await BarcodeDetector.getSupportedFormats();
+      log('   Formatos: ' + formats.join(', '), 'ok');
+      var hasCode128 = formats.includes('code_128');
+      var hasQR = formats.includes('qr_code');
+      log('   CODE_128: ' + (hasCode128 ? '✅' : '❌') + ' | QR: ' + (hasQR ? '✅' : '❌'), hasCode128 ? 'ok' : 'err');
+    } catch(e) {
+      log('   Error obteniendo formatos: ' + e.message, 'err');
+    }
+  } else {
+    log('❌ BarcodeDetector API: NO DISPONIBLE', 'err');
+    log('   → El navegador no tiene detección nativa de códigos', 'warn');
+  }
+
+  // 2. getUserMedia
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    log('✅ getUserMedia: DISPONIBLE', 'ok');
+  } else {
+    log('❌ getUserMedia: NO DISPONIBLE', 'err');
+  }
+
+  // 3. Canvas getImageData
+  try {
+    var c = document.createElement('canvas');
+    c.width = 10; c.height = 10;
+    var ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.getImageData(0, 0, 10, 10);
+    log('✅ Canvas getImageData: DISPONIBLE', 'ok');
+  } catch(e) {
+    log('❌ Canvas getImageData: ' + e.message, 'err');
+  }
+
+  // 4. Contexto de seguridad
+  log('🔒 Protocolo: ' + location.protocol + ' (debe ser https:)', location.protocol === 'https:' ? 'ok' : 'err');
+  log('📱 UserAgent: ' + navigator.userAgent.substring(0, 80));
+}
+
+async function iniciar() {
+  detener();
+  frames = 0;
+  active = true;
+  document.getElementById('result').style.display = 'none';
+  log('--- Abriendo cámara...');
+
+  try {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      var t = stream.getVideoTracks()[0];
+      var s = t.getSettings();
+      log('✅ Cámara: ' + t.label.substring(0,40), 'ok');
+      log('   Resolución: ' + s.width + 'x' + s.height + ' | facing: ' + (s.facingMode||'?'), 'ok');
+    } catch(e) {
+      log('⚠️ Cámara trasera falló, intentando cualquiera...', 'warn');
+      stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      log('✅ Cámara genérica OK', 'ok');
+    }
+  } catch(e) {
+    log('❌ Error cámara: ' + e.name + ' — ' + e.message, 'err');
+    active = false;
+    return;
+  }
+
+  var video = document.getElementById('video');
+  video.srcObject = stream;
+  try { await video.play(); } catch(e) { log('⚠️ play() error: ' + e.message, 'warn'); }
+
+  // Esperar dimensiones
+  await new Promise(function(r) {
+    if (video.videoWidth > 0) { r(); return; }
+    var t = setInterval(function(){ if (video.videoWidth > 0){ clearInterval(t); r(); } }, 50);
+    setTimeout(function(){ clearInterval(t); r(); }, 3000);
+  });
+  log('📹 Video: ' + video.videoWidth + 'x' + video.videoHeight + ' readyState=' + video.readyState, 'ok');
+
+  // Elegir método
+  if ('BarcodeDetector' in window) {
+    log('→ Usando BarcodeDetector nativo', 'ok');
+    usarBarcodeDetector(video);
+  } else {
+    log('→ BarcodeDetector no disponible, usando canvas+manual', 'warn');
+    log('  (instala ZXing o similar para este caso)', 'warn');
+    usarCanvasManual(video);
+  }
+}
+
+async function usarBarcodeDetector(video) {
+  try {
+    var formats = await BarcodeDetector.getSupportedFormats();
+    var wanted = ['code_128','code_39','ean_13','ean_8','qr_code','data_matrix'].filter(function(f){ return formats.includes(f); });
+    log('Detectando formatos: ' + wanted.join(', '));
+    detector = new BarcodeDetector({ formats: wanted });
+  } catch(e) {
+    log('❌ Error creando BarcodeDetector: ' + e.message, 'err');
+    return;
+  }
+
+  var canvas = document.createElement('canvas');
+  var ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  timer = setInterval(async function() {
+    if (!active || video.readyState < 2 || !video.videoWidth) return;
+    frames++;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0);
+
+    try {
+      // Método 1: detectar desde canvas
+      var barcodes = await detector.detect(canvas);
+      if (barcodes && barcodes.length > 0) {
+        var b = barcodes[0];
+        detener();
+        log('✅ DETECTADO: ' + b.rawValue + ' [' + b.format + ']', 'ok');
+        var r = document.getElementById('result');
+        r.textContent = '✅ ' + b.rawValue;
+        r.style.display = 'block';
+        return;
+      }
+    } catch(e) {
+      if (frames % 20 === 0) log('BarcodeDetector error frame ' + frames + ': ' + e.message, 'err');
+    }
+
+    if (frames % 30 === 0) log('Frame ' + frames + ' procesado — sin código aún');
+  }, 300);
+}
+
+function usarCanvasManual(video) {
+  // Sin ZXing solo podemos avisar
+  log('⚠️ Sin BarcodeDetector y sin librería externa — no es posible decodificar', 'warn');
+  log('   Resultado: el scanner muestra video pero nunca detecta nada', 'err');
+  log('   Solución: habilitar BarcodeDetector en Chrome flags o usar otra librería', 'warn');
+}
+
+function detener() {
+  active = false;
+  if (timer) { clearInterval(timer); timer = null; }
+  detector = null;
+  if (stream) { stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; }
+  var video = document.getElementById('video');
+  try { video.srcObject = null; } catch(e){}
+  if (frames > 0) log('Detenido tras ' + frames + ' frames');
+}
+</script>
+</body>
+</html>
